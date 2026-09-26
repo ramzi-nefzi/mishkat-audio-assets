@@ -1,0 +1,141 @@
+name: Fetch and Build Islamic Audio Assets
+
+on:
+  workflow_dispatch: # يتيح تشغيله يدوياً بضغطة زر واحدة
+
+permissions:
+  contents: write # للسماح للسكربت بحفظ الملفات وعمل Push تلقائياً
+
+jobs:
+  download-audio:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Download Hisn Al-Muslim & Azan Audios
+        run: |
+          python3 - << 'EOF'
+          import os
+          import json
+          import urllib.request
+          from concurrent.futures import ThreadPoolExecutor
+
+          HEADERS = {
+              "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+          }
+
+          AZAN_LIST = [
+              {"id": "azan_makkah", "name_ar": "أذان الحرم المكي الشريف", "file": "azan/azan_makkah.mp3", "url": "https://ia800207.us.archive.org/3/items/Azan_Makkah/azan_makkah.mp3"},
+              {"id": "azan_madinah", "name_ar": "أذان المسجد النبوي الشريف", "file": "azan/azan_madinah.mp3", "url": "https://ia800207.us.archive.org/3/items/Azan_Makkah/azan_madinah.mp3"},
+              {"id": "azan_aqsa", "name_ar": "أذان المسجد الأقصى المبارك", "file": "azan/azan_aqsa.mp3", "url": "https://ia801804.us.archive.org/32/items/Athan_alaqsa/athan_alaqsa.mp3"},
+              {"id": "azan_abdul_basit", "name_ar": "أذان الشيخ عبد الباسط عبد الصمد", "file": "azan/azan_abdul_basit.mp3", "url": "https://ia800302.us.archive.org/21/items/AdhanAbdulBasit/AdhanAbdulBasit.mp3"},
+              {"id": "azan_ali_buraq", "name_ar": "أذان الشيخ علي البراق (تونس)", "file": "azan/azan_ali_buraq.mp3", "url": "https://ia801402.us.archive.org/28/items/AdhanAliBaraq/AdhanAliBaraq.mp3"},
+              {"id": "azan_mishary", "name_ar": "أذان الشيخ مشاري العفاسي", "file": "azan/azan_mishary.mp3", "url": "https://ia800301.us.archive.org/16/items/Athan_Alafasy/athan_alafasy.mp3"}
+          ]
+
+          COMMON_DHIKR = [
+              {"id": "ayat_al_kursi", "name_ar": "آية الكرسي", "file": "dhikr/ayat_al_kursi.mp3", "url": "https://everyayah.com/data/Alafasy_128kbps/002255.mp3"},
+              {"id": "al_ikhlas", "name_ar": "سورة الإخلاص", "file": "dhikr/al_ikhlas.mp3", "url": "https://server8.mp3quran.net/afs/112.mp3"},
+              {"id": "al_falaq", "name_ar": "سورة الفلق", "file": "dhikr/al_falaq.mp3", "url": "https://server8.mp3quran.net/afs/113.mp3"},
+              {"id": "an_nas", "name_ar": "سورة الناس", "file": "dhikr/an_nas.mp3", "url": "https://server8.mp3quran.net/afs/114.mp3"}
+          ]
+
+          def download(url, path):
+              if os.path.exists(path) and os.path.getsize(path) > 1024:
+                  return True
+              os.makedirs(os.path.dirname(path), exist_ok=True)
+              tmp = path + ".tmp"
+              try:
+                  req = urllib.request.Request(url, headers=HEADERS)
+                  with urllib.request.urlopen(req, timeout=45) as resp:
+                      with open(tmp, "wb") as f:
+                          while chunk := resp.read(64 * 1024):
+                              f.write(chunk)
+                  if os.path.getsize(tmp) > 500:
+                      os.replace(tmp, path)
+                      return True
+              except Exception as e:
+                  print(f"Error {url}: {e}")
+              if os.path.exists(tmp):
+                  os.remove(tmp)
+              return False
+
+          print(">>> [1/3] تحميل أصوات الأذان...")
+          for a in AZAN_LIST:
+              print(f"جاري تحميل: {a['name_ar']}")
+              download(a["url"], a["file"])
+
+          print(">>> [2/3] تحميل السور والأذكار الأساسية...")
+          for d in COMMON_DHIKR:
+              print(f"جاري تحميل: {d['name_ar']}")
+              download(d["url"], d["file"])
+
+          print(">>> [3/3] جلب وتحميل أبواب حصن المسلم من API الرسمي...")
+          hisn_chapters = []
+          try:
+              req = urllib.request.Request("https://www.hisnmuslim.com/api/ar/husn_ar.json", headers=HEADERS)
+              with urllib.request.urlopen(req, timeout=30) as resp:
+                  data = json.loads(resp.read().decode("utf-8-sig"))
+                  hisn_chapters = data.get("العربية", [])
+          except Exception as e:
+              print(f"API Error: {e}")
+
+          print(f"تم العثور على {len(hisn_chapters)} باباً من حصن المسلم. جاري التحميل...")
+          with ThreadPoolExecutor(max_workers=8) as ex:
+              futures = []
+              for ch in hisn_chapters:
+                  cid = ch.get("ID")
+                  audio_url = ch.get("AUDIO_URL")
+                  if audio_url:
+                      path = f"hisn/chapter_{cid:03d}.mp3"
+                      futures.append((ex.submit(download, audio_url, path), ch, path))
+              
+              done = 0
+              for f, ch, path in futures:
+                  if f.result():
+                      done += 1
+                  if done % 20 == 0 or done == len(futures):
+                      print(f"تم تحميل {done}/{len(futures)} باباً...")
+
+          # إنشاء ملف الفهرس الموحد
+          manifest = {
+              "repository": "mishkat-audio-assets",
+              "cdn_base_url": "https://cdn.jsdelivr.net/gh/ramzi-nefzi/mishkat-audio-assets@main",
+              "azan": [
+                  {"id": a["id"], "name_ar": a["name_ar"], "path": a["file"]}
+                  for a in AZAN_LIST if os.path.exists(a["file"])
+              ],
+              "dhikr": [
+                  {"id": d["id"], "name_ar": d["name_ar"], "path": d["file"]}
+                  for d in COMMON_DHIKR if os.path.exists(d["file"])
+              ],
+              "hisn": [
+                  {"chapter_id": ch.get("ID"), "title_ar": ch.get("TITLE"), "path": f"hisn/chapter_{ch.get('ID'):03d}.mp3"}
+                  for ch in hisn_chapters if os.path.exists(f"hisn/chapter_{ch.get('ID'):03d}.mp3")
+              ]
+          }
+          with open("audio_manifest.json", "w", encoding="utf-8") as f:
+              json.dump(manifest, f, ensure_ascii=False, indent=2)
+
+          print(">>> تم الانتهاء بنجاح وإنشاء audio_manifest.json!")
+          EOF
+
+      - name: Commit and Push Changes to Repository
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add azan/ dhikr/ hisn/ audio_manifest.json
+          if git diff --staged --quiet; then
+            echo "No new files to commit."
+          else
+            git commit -m "Auto-download all Islamic audio assets and Hisn Al-Muslim"
+            git push origin main
+          fi
